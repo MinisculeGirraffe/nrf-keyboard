@@ -1,0 +1,13 @@
+[profile.release]
+# Allows defmt to display log locations even in release
+debug = true
+
+[target.'cfg(all(target_arch = "arm", target_os = "none"))']
+# replace nRF82840_xxAA with your chip as listed in `probe-rs chip list`
+runner = "probe-rs run --chip nRF52840_xxAA"
+
+[build]
+target = "thumbv7em-none-eabif"
+
+[env]
+DEFMT_LOG = "trace"

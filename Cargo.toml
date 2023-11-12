@@ -1,0 +1,19 @@
+[package]
+name = "nrf"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+defmt = "0.3"
+defmt-rtt = "0.4"
+panic-probe = { version = "0.3.1", features = ["print-defmt"] }
+embassy-executor = { version = "0.3.2", git = "https://github.com/embassy-rs/embassy", rev = "584fc35", features = ["arch-cortex-m", "executor-thread", "executor-interrupt", "nightly", "defmt", "integrated-timers"]}
+embassy-nrf = { version = "0.1", git = "https://github.com/embassy-rs/embassy", rev = "584fc35", features = [ "nightly", "defmt", "nrf52840", "gpiote", "time-driver-rtc1" ] }
+embassy-time = {version = "0.1", git = "https://github.com/embassy-rs/embassy", rev = "584fc35", features = ["nightly", "defmt", "defmt-timestamp-uptime"]}
+cortex-m = "0.7.7"
+cortex-m-rt = "0.7.3"
+nrf-softdevice = {version = "0.1.0", git = "https://github.com/embassy-rs/nrf-softdevice", features = ["nightly", "defmt", "nrf52840", "s140", "ble-peripheral", "ble-central", "critical-section-impl"]}
+nrf-softdevice-s140 = {version = "*", git = "https://github.com/embassy-rs/nrf-softdevice"}
+
