@@ -16,4 +16,6 @@ cortex-m = "0.7.7"
 cortex-m-rt = "0.7.3"
 nrf-softdevice = {version = "0.1.0", git = "https://github.com/embassy-rs/nrf-softdevice", features = ["nightly", "defmt", "nrf52840", "s140", "ble-peripheral", "ble-central", "critical-section-impl"]}
 nrf-softdevice-s140 = {version = "*", git = "https://github.com/embassy-rs/nrf-softdevice"}
+tinyvec = {version = "1.6.0", features = ["rustc_1_57"]}
+typenum = {version = "1.17.0", features = ["const-generics","no_std"]}
 

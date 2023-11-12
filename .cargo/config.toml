@@ -7,7 +7,7 @@ debug = true
 runner = "probe-rs run --chip nRF52840_xxAA"
 
 [build]
-target = "thumbv7em-none-eabif"
+target = "thumbv7em-none-eabihf"
 
 [env]
 DEFMT_LOG = "trace"
