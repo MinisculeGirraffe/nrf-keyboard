@@ -91,6 +91,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
+name = "cobs"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67ba02a97a2bd10f4b59b25c7973101c79642302776489e030cd13cdab09ed15"
+
+[[package]]
 name = "cortex-m"
 version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -247,6 +253,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ekv"
+version = "0.1.0"
+source = "git+https://github.com/embassy-rs/ekv?rev=d24ac27#d24ac27eabbfda027c21167f9e9dcf73887de3e1"
+dependencies = [
+ "embassy-sync 0.3.0",
+ "heapless",
+]
+
+[[package]]
 name = "embassy-embedded-hal"
 version = "0.1.0"
 source = "git+https://github.com/embassy-rs/embassy?rev=584fc35#584fc358fd533c3f3a832643bd6074bc00281e74"
@@ -369,6 +384,17 @@ dependencies = [
  "cfg-if",
  "critical-section",
  "embedded-io 0.4.0",
+ "futures-util",
+ "heapless",
+]
+
+[[package]]
+name = "embassy-sync"
+version = "0.3.0"
+source = "git+https://github.com/embassy-rs/embassy?rev=3477cc6bbd45c66f36af18f72607f54c059ee3ca#3477cc6bbd45c66f36af18f72607f54c059ee3ca"
+dependencies = [
+ "cfg-if",
+ "critical-section",
  "futures-util",
  "heapless",
 ]
@@ -606,6 +632,7 @@ dependencies = [
  "atomic-polyfill 0.1.11",
  "hash32",
  "rustc_version 0.4.0",
+ "serde",
  "spin",
  "stable_deref_trait",
 ]
@@ -667,20 +694,25 @@ dependencies = [
  "cortex-m-rt",
  "defmt",
  "defmt-rtt",
+ "ekv",
  "embassy-executor",
  "embassy-nrf",
+ "embassy-sync 0.3.0",
  "embassy-time",
  "embassy-usb",
  "embedded-alloc",
  "nrf-softdevice",
- "nrf-softdevice-s140",
+ "nrf-softdevice-s140 0.1.1 (git+https://github.com/embassy-rs/nrf-softdevice)",
  "panic-probe",
+ "postcard",
+ "rand_core",
+ "serde",
+ "thiserror-core",
 ]
 
 [[package]]
 name = "nrf-softdevice"
 version = "0.1.0"
-source = "git+https://github.com/embassy-rs/nrf-softdevice#9e73020d0877a5bc0e0a86d59a2a8dc390aded13"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
@@ -694,15 +726,15 @@ dependencies = [
  "futures",
  "heapless",
  "nrf-softdevice-macro",
- "nrf-softdevice-s140",
+ "nrf-softdevice-s140 0.1.1",
  "nrf52840-pac",
  "num_enum",
+ "serde",
 ]
 
 [[package]]
 name = "nrf-softdevice-macro"
 version = "0.1.0"
-source = "git+https://github.com/embassy-rs/nrf-softdevice#9e73020d0877a5bc0e0a86d59a2a8dc390aded13"
 dependencies = [
  "Inflector",
  "darling 0.13.4",
@@ -711,6 +743,10 @@ dependencies = [
  "syn 1.0.109",
  "uuid",
 ]
+
+[[package]]
+name = "nrf-softdevice-s140"
+version = "0.1.1"
 
 [[package]]
 name = "nrf-softdevice-s140"
@@ -877,6 +913,17 @@ name = "pin-utils"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
+
+[[package]]
+name = "postcard"
+version = "1.0.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a55c51ee6c0db07e68448e336cf8ea4131a620edefebf9893e759b2d793420f8"
+dependencies = [
+ "cobs",
+ "heapless",
+ "serde",
+]
 
 [[package]]
 name = "proc-macro-error"
@@ -1080,6 +1127,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9a7210f5c9a7156bb50aa36aed4c95afb51df0df00713949448cf9e97d382d2"
 dependencies = [
  "thiserror-impl",
+]
+
+[[package]]
+name = "thiserror-core"
+version = "1.0.38"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d97345f6437bb2004cd58819d8a9ef8e36cdd7661c2abc4bbde0a7c40d9f497"
+dependencies = [
+ "thiserror-core-impl",
+]
+
+[[package]]
+name = "thiserror-core-impl"
+version = "1.0.38"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10ac1c5050e43014d16b2f94d0d2ce79e65ffdd8b38d8048f9c8f6a8a6da62ac"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
 ]
 
 [[package]]

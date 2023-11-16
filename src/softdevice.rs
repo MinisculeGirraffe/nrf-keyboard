@@ -1,6 +1,12 @@
-use alloc::vec::Vec;
-use core::{cell::Ref, marker::PhantomData};
-use defmt::info;
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
+use core::{
+    cell::{Cell, OnceCell, RefCell},
+    marker::PhantomData,
+};
+use defmt::{debug, info, unwrap, Format};
 use embassy_executor::Spawner;
 use nrf_softdevice::{
     ble::{
@@ -8,15 +14,19 @@ use nrf_softdevice::{
             self,
             builder::ServiceBuilder,
             characteristic::{Attribute, Metadata, Properties},
-            CharacteristicHandles, DescriptorHandle, GetValueError, NotifyValueError,
-            RegisterError, SetValueError, WriteOp,
+            set_sys_attrs, CharacteristicHandles, GetValueError, NotifyValueError, RegisterError,
+            SetValueError, WriteOp,
         },
         peripheral::{self, AdvertiseError},
-        Connection, SecurityMode, Uuid,
+        security::{IoCapabilities, SecurityHandler},
+        Connection, EncryptionInfo, IdentityKey, MasterId, SecurityMode, Uuid,
     },
     raw, Softdevice,
 };
 use nrf_softdevice_s140::*;
+use serde::{Deserialize, Serialize};
+
+use crate::kvstore::DBKey;
 
 #[embassy_executor::task]
 async fn softdevice_task(sd: &'static Softdevice) -> ! {
@@ -40,7 +50,7 @@ fn softdevice_config() -> nrf_softdevice::Config {
             conn_count: 1,
             event_length: 24,
         }),
-        conn_gatt: Some(raw::ble_gatt_conn_cfg_t { att_mtu: 256 }),
+        conn_gatt: Some(raw::ble_gatt_conn_cfg_t { att_mtu: 1024 }),
         gatts_attr_tab_size: Some(raw::ble_gatts_cfg_attr_tab_size_t {
             attr_tab_size: raw::BLE_GATTS_ATTR_TAB_SIZE_DEFAULT,
         }),
@@ -76,18 +86,15 @@ pub fn init(spawner: Spawner) -> (GATTServer, &'static Softdevice) {
     (server, sd)
 }
 const HID_SERVICE: u16 = 0x1812;
-const BATTERY_SERVICE: u16 = 0x180F;
-const DEVICE_INFO_SERVICE: u16 = 0x180A;
+const _BATTERY_SERVICE: u16 = 0x180F;
+const _DEVICE_INFO_SERVICE: u16 = 0x180A;
+const BONDER: OnceCell<Bonder> = OnceCell::new();
 pub async fn advertise(sd: &Softdevice) -> Result<Connection, AdvertiseError> {
     let config = peripheral::Config::default();
 
-    let adv = AdvData {
-        flags: raw::BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE as u8,
-        name: "HelloWorld",
-        uuids: [HID_SERVICE, BATTERY_SERVICE, DEVICE_INFO_SERVICE],
-        appearance: BLE_APPEARANCE_HID_KEYBOARD as u8,
-    }
-    .to_bytes();
+    let bonder = BONDER.get_or_init(|| Bonder::default());
+    let adv = AdvData::default().to_bytes();
+
     let adv_data = adv.as_slice();
 
     info!("Advertising: {=[u8]:#X}", &adv_data);
@@ -101,22 +108,40 @@ pub async fn advertise(sd: &Softdevice) -> Result<Connection, AdvertiseError> {
 
 /// https://infocenter.nordicsemi.com/topic/com.nordic.infocenter.s140.api.v7.3.0/group___b_l_e___g_a_p___a_d___t_y_p_e___d_e_f_i_n_i_t_i_o_n_s.html?cp=5_7_4_1_2_1_1_5
 /// https://bitbucket.org/bluetooth-SIG/public/src/main/assigned_numbers/
-#[derive(Debug, defmt::Format)]
-struct AdvData<'a, const N: usize> {
-    flags: u8,
-    uuids: [u16; N],
-    name: &'a str,
-    appearance: u8,
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AdvData {
+   pub flags: u8,
+   pub uuids: Vec<u16>,
+   pub name: String,
+   pub appearance: u8,
 }
-impl<const N: usize> AdvData<'_, N> {
+
+impl Default for AdvData {
+    fn default() -> Self {
+        AdvData {
+            flags: raw::BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE as u8,
+            name: "HelloWorld".to_string(),
+            uuids: [HID_SERVICE].to_vec(),
+            appearance: BLE_APPEARANCE_HID_KEYBOARD as u8,
+        }
+    }
+}
+
+impl DBKey for AdvData {
+    const KEY: &'static [u8] = b"AdvData";
+}
+impl AdvData {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut data = Vec::new();
+        data.push(2);
+        data.push(BLE_GAP_AD_TYPE_APPEARANCE as u8);
+        data.push(self.appearance);
 
         //flags
         data.extend_from_slice(&[0x02, BLE_GAP_AD_TYPE_FLAGS as u8, self.flags]);
 
         //service uuids
-        data.push(N as u8 * 2 + 1);
+        data.push(self.uuids.len() as u8 * 2 + 1);
         data.push(BLE_GAP_AD_TYPE_16BIT_SERVICE_UUID_COMPLETE as u8);
         self.uuids
             .iter()
@@ -127,15 +152,107 @@ impl<const N: usize> AdvData<'_, N> {
         data.push(BLE_GAP_AD_TYPE_COMPLETE_LOCAL_NAME as u8);
         data.extend_from_slice(self.name.as_bytes());
 
-        data.push(2);
-        data.push(BLE_GAP_AD_TYPE_APPEARANCE as u8);
-        data.push(self.appearance);
-
         data
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct Peer {
+    master_id: MasterId,
+    key: EncryptionInfo,
+    peer_id: IdentityKey,
+}
+
+pub struct Bonder {
+    peer: Cell<Option<Peer>>,
+    sys_attrs: RefCell<Vec<u8>>,
+}
+
+impl Default for Bonder {
+    fn default() -> Self {
+        Bonder {
+            peer: Cell::new(None),
+            sys_attrs: Default::default(),
+        }
+    }
+}
+
+impl SecurityHandler for Bonder {
+    fn io_capabilities(&self) -> IoCapabilities {
+        IoCapabilities::DisplayOnly
+    }
+
+    fn can_bond(&self, _conn: &Connection) -> bool {
+        true
+    }
+
+    fn display_passkey(&self, passkey: &[u8; 6]) {
+        info!("The passkey is \"{:a}\"", passkey)
+    }
+
+    fn on_bonded(
+        &self,
+        _conn: &Connection,
+        master_id: MasterId,
+        key: EncryptionInfo,
+        peer_id: IdentityKey,
+    ) {
+        debug!("storing bond for: id: {}, key: {}", master_id, key);
+
+        // In a real application you would want to signal another task to permanently store the keys in non-volatile memory here.
+        self.sys_attrs.borrow_mut().clear();
+        self.peer.set(Some(Peer {
+            master_id,
+            key,
+            peer_id,
+        }));
+    }
+
+    fn get_key(&self, _conn: &Connection, master_id: MasterId) -> Option<EncryptionInfo> {
+        debug!("getting bond for: id: {}", master_id);
+
+        self.peer
+            .get()
+            .and_then(|peer| (master_id == peer.master_id).then_some(peer.key))
+    }
+
+    fn save_sys_attrs(&self, conn: &Connection) {
+        debug!("saving system attributes for: {}", conn.peer_address());
+
+        if let Some(peer) = self.peer.get() {
+            if peer.peer_id.is_match(conn.peer_address()) {
+                let mut sys_attrs = self.sys_attrs.borrow_mut();
+                let capacity = sys_attrs.capacity();
+                //  unwrap!(sys_attrs.resize(capacity, 0));
+                let len = unwrap!(gatt_server::get_sys_attrs(conn, &mut sys_attrs)) as u16;
+                sys_attrs.truncate(usize::from(len));
+                // In a real application you would want to signal another task to permanently store sys_attrs for this connection's peer
+            }
+        }
+    }
+
+    fn load_sys_attrs(&self, conn: &Connection) {
+        let addr = conn.peer_address();
+        debug!("loading system attributes for: {}", addr);
+
+        let attrs = self.sys_attrs.borrow();
+        // In a real application you would search all stored peers to find a match
+        let attrs = if self
+            .peer
+            .get()
+            .map(|peer| peer.peer_id.is_match(addr))
+            .unwrap_or(false)
+        {
+            (!attrs.is_empty()).then_some(attrs.as_slice())
+        } else {
+            None
+        };
+
+        unwrap!(set_sys_attrs(conn, attrs));
+    }
+}
+
+#[derive(Debug, Clone, Copy, Format)]
 pub struct CharachteristicHandle<T: core::convert::AsRef<[u8]> + Sized> {
     value_handle: u16,
     user_desc_handle: u16,
@@ -190,14 +307,14 @@ where
         Self {
             value_handle: value.value_handle,
             user_desc_handle: value.user_desc_handle,
-            cccd_handle: value.user_desc_handle,
+            cccd_handle: value.cccd_handle,
             sccd_handle: value.sccd_handle,
             _marker: PhantomData,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Format)]
 pub struct BatteryService {
     service_handle: u16,
     level: CharachteristicHandle<[u8; 1]>,
@@ -211,7 +328,7 @@ impl BatteryService {
             &mut service_builder,
             Uuid::new_16(0x2A19),
             Attribute::new([0u8]).security(SecurityMode::Open),
-            Metadata::new(Properties::new().read().notify()),
+            Metadata::new(Properties::new().read()),
         )?;
 
         Ok(BatteryService {
@@ -227,7 +344,7 @@ impl BatteryService {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Format)]
 pub struct DeviceInformationService {
     service_handle: u16,
     manufacturer_name: CharachteristicHandle<[u8; 4]>,
@@ -305,12 +422,13 @@ impl DeviceInformationService {
         })
     }
 }
-#[derive(Clone)]
+#[derive(Clone, Format)]
 ///This service exposes the HID reports and other HID data intended for HID Hosts and HID Devices. Summary: The HID Service exposes characteristics required for a HID Device to transfer HID report descriptors and reports to a HID Host. This also exposes the characteristics for a HID Host to write to a Device. The Human Interface Device Service is instantiated as a Primary Service.
 pub struct HIDService {
     service_handle: u16,
     protocol_mode: CharachteristicHandle<[u8; 1]>,
     pub report: CharachteristicHandle<[u8; 8]>,
+    cccd: u16,
     report_map: CharachteristicHandle<[u8; 45]>,
     hid_information: CharachteristicHandle<[u8; 4]>,
     hid_control_point: CharachteristicHandle<[u8; 1]>,
@@ -329,21 +447,20 @@ impl HIDService {
 
         let mut x = service_builder.add_characteristic(
             Uuid::new_16(0x2A4D),
-            Attribute::new([0u8; 8]).security(SecurityMode::Open),
-            Metadata::new(Properties::new().notify().read().write()),
+            Attribute::new([0u8; 8]).security(SecurityMode::Mitm),
+            Metadata::new(Properties::new().notify().read().write().signed_write()),
         )?;
 
         let client_characteristic_configuration = x.add_descriptor(
-            Uuid::new_128(&[
-                0x00, 0x00, 0x29, 0x02, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0x80, 0x5f, 0x9b,
-                0x34, 0xfb,
-            ]),
-            Attribute::new([0x0, 0x01]).security(SecurityMode::Mitm),
+            Uuid::new_16(2902),
+            Attribute::new([0x0, 0x01])
+                .security(SecurityMode::Mitm)
+                .write_security(SecurityMode::Mitm),
         )?;
 
         let report_reference = x.add_descriptor(
             Uuid::new_16(0x2908),
-            Attribute::new([0x0, 0x01]).security(SecurityMode::Mitm),
+            Attribute::new([0x0, 0x00]).security(SecurityMode::Mitm),
         )?;
 
         let report = x.build();
@@ -396,20 +513,23 @@ impl HIDService {
             &mut service_builder,
             Uuid::new_16(0x2A4C),
             Attribute::new([0x0]).security(SecurityMode::Open),
-            Metadata::new(Properties::new().read()),
+            Metadata::new(Properties::new().write_without_response()),
         )?;
 
         Ok(Self {
             service_handle: service_builder.build().handle(),
             protocol_mode,
             report: report.into(),
+            cccd: client_characteristic_configuration.handle(),
             report_map: report_map.into(),
             hid_information,
             hid_control_point,
         })
     }
+
+    pub fn on_write(&self, handle: u16, data: &[u8]) {}
 }
-#[derive(Clone)]
+#[derive(Clone, Format)]
 pub struct GATTServer {
     pub bas: BatteryService,
     pub das: DeviceInformationService,
@@ -418,9 +538,10 @@ pub struct GATTServer {
 
 impl GATTServer {
     pub fn new(sd: &mut Softdevice) -> Result<Self, RegisterError> {
+        let hid = HIDService::new(sd)?;
         let bas = BatteryService::new(sd)?;
         let das = DeviceInformationService::new(sd)?;
-        let hid = HIDService::new(sd)?;
+
         Ok(Self { bas, das, hid })
     }
 }
@@ -436,7 +557,9 @@ impl gatt_server::Server for GATTServer {
         _offset: usize,
         data: &[u8],
     ) -> Option<Self::Event> {
+        info!("Handle: {} Got Data: {=[u8]:#X}", handle, &data);
         self.bas.on_write(handle, data);
+        self.hid.on_write(handle, data);
         None
     }
 }
