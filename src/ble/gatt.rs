@@ -1,256 +1,19 @@
-use alloc::{
-    string::{String, ToString},
-    vec::Vec,
-};
-use core::{
-    cell::{Cell, OnceCell, RefCell},
-    marker::PhantomData,
-};
-use defmt::{debug, info, unwrap, Format};
-use embassy_executor::Spawner;
+use core::marker::PhantomData;
+
+use defmt::{info, Format};
 use nrf_softdevice::{
     ble::{
         gatt_server::{
             self,
             builder::ServiceBuilder,
             characteristic::{Attribute, Metadata, Properties},
-            set_sys_attrs, CharacteristicHandles, GetValueError, NotifyValueError, RegisterError,
-            SetValueError, WriteOp,
+            CharacteristicHandles, GetValueError, NotifyValueError, RegisterError, SetValueError,
+            WriteOp,
         },
-        peripheral::{self, AdvertiseError},
-        security::{IoCapabilities, SecurityHandler},
-        Connection, EncryptionInfo, IdentityKey, MasterId, SecurityMode, Uuid,
+        Connection, SecurityMode, Uuid,
     },
-    raw, Softdevice,
+    Softdevice,
 };
-use nrf_softdevice_s140::*;
-use serde::{Deserialize, Serialize};
-
-use crate::kvstore::DBKey;
-
-#[embassy_executor::task]
-async fn softdevice_task(sd: &'static Softdevice) -> ! {
-    sd.run().await
-}
-
-#[embassy_executor::task]
-pub async fn gatt_task(conn: Connection, server: GATTServer) {
-    gatt_server::run(&conn, &server, |_| {}).await;
-}
-
-fn softdevice_config() -> nrf_softdevice::Config {
-    nrf_softdevice::Config {
-        clock: Some(raw::nrf_clock_lf_cfg_t {
-            source: raw::NRF_CLOCK_LF_SRC_RC as u8,
-            rc_ctiv: 16,
-            rc_temp_ctiv: 2,
-            accuracy: raw::NRF_CLOCK_LF_ACCURACY_500_PPM as u8,
-        }),
-        conn_gap: Some(raw::ble_gap_conn_cfg_t {
-            conn_count: 1,
-            event_length: 24,
-        }),
-        conn_gatt: Some(raw::ble_gatt_conn_cfg_t { att_mtu: 1024 }),
-        gatts_attr_tab_size: Some(raw::ble_gatts_cfg_attr_tab_size_t {
-            attr_tab_size: raw::BLE_GATTS_ATTR_TAB_SIZE_DEFAULT,
-        }),
-        gap_role_count: Some(raw::ble_gap_cfg_role_count_t {
-            adv_set_count: 1,
-            periph_role_count: 3,
-            central_role_count: 3,
-            central_sec_count: 3,
-            _bitfield_1: raw::ble_gap_cfg_role_count_t::new_bitfield_1(0),
-        }),
-        gap_device_name: Some(raw::ble_gap_cfg_device_name_t {
-            write_perm: raw::ble_gap_conn_sec_mode_t {
-                _bitfield_1: raw::ble_gap_conn_sec_mode_t::new_bitfield_1(1, 2), // TODO: Change this!
-            },
-            _bitfield_1: raw::ble_gap_cfg_device_name_t::new_bitfield_1(
-                raw::BLE_GATTS_VLOC_STACK as u8,
-            ),
-            p_value: b"HelloWorld" as *const u8 as _,
-            current_len: 10,
-            max_len: 10,
-        }),
-        ..Default::default()
-    }
-}
-
-pub fn init(spawner: Spawner) -> (GATTServer, &'static Softdevice) {
-    let config = softdevice_config();
-
-    let sd = Softdevice::enable(&config);
-    let server = GATTServer::new(sd).expect("failed to create GATT server");
-    spawner.must_spawn(softdevice_task(sd));
-
-    (server, sd)
-}
-const HID_SERVICE: u16 = 0x1812;
-const _BATTERY_SERVICE: u16 = 0x180F;
-const _DEVICE_INFO_SERVICE: u16 = 0x180A;
-const BONDER: OnceCell<Bonder> = OnceCell::new();
-pub async fn advertise(sd: &Softdevice) -> Result<Connection, AdvertiseError> {
-    let config = peripheral::Config::default();
-
-    let bonder = BONDER.get_or_init(|| Bonder::default());
-    let adv = AdvData::default().to_bytes();
-
-    let adv_data = adv.as_slice();
-
-    info!("Advertising: {=[u8]:#X}", &adv_data);
-    let adv = peripheral::ConnectableAdvertisement::ScannableUndirected {
-        adv_data,
-        scan_data: &[],
-    };
-
-    peripheral::advertise_connectable(sd, adv, &config).await
-}
-
-/// https://infocenter.nordicsemi.com/topic/com.nordic.infocenter.s140.api.v7.3.0/group___b_l_e___g_a_p___a_d___t_y_p_e___d_e_f_i_n_i_t_i_o_n_s.html?cp=5_7_4_1_2_1_1_5
-/// https://bitbucket.org/bluetooth-SIG/public/src/main/assigned_numbers/
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AdvData {
-   pub flags: u8,
-   pub uuids: Vec<u16>,
-   pub name: String,
-   pub appearance: u8,
-}
-
-impl Default for AdvData {
-    fn default() -> Self {
-        AdvData {
-            flags: raw::BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE as u8,
-            name: "HelloWorld".to_string(),
-            uuids: [HID_SERVICE].to_vec(),
-            appearance: BLE_APPEARANCE_HID_KEYBOARD as u8,
-        }
-    }
-}
-
-impl DBKey for AdvData {
-    const KEY: &'static [u8] = b"AdvData";
-}
-impl AdvData {
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut data = Vec::new();
-        data.push(2);
-        data.push(BLE_GAP_AD_TYPE_APPEARANCE as u8);
-        data.push(self.appearance);
-
-        //flags
-        data.extend_from_slice(&[0x02, BLE_GAP_AD_TYPE_FLAGS as u8, self.flags]);
-
-        //service uuids
-        data.push(self.uuids.len() as u8 * 2 + 1);
-        data.push(BLE_GAP_AD_TYPE_16BIT_SERVICE_UUID_COMPLETE as u8);
-        self.uuids
-            .iter()
-            .for_each(|uuid| data.extend_from_slice(&uuid.to_le_bytes()));
-
-        //name
-        data.push(self.name.len() as u8 + 1);
-        data.push(BLE_GAP_AD_TYPE_COMPLETE_LOCAL_NAME as u8);
-        data.extend_from_slice(self.name.as_bytes());
-
-        data
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-struct Peer {
-    master_id: MasterId,
-    key: EncryptionInfo,
-    peer_id: IdentityKey,
-}
-
-pub struct Bonder {
-    peer: Cell<Option<Peer>>,
-    sys_attrs: RefCell<Vec<u8>>,
-}
-
-impl Default for Bonder {
-    fn default() -> Self {
-        Bonder {
-            peer: Cell::new(None),
-            sys_attrs: Default::default(),
-        }
-    }
-}
-
-impl SecurityHandler for Bonder {
-    fn io_capabilities(&self) -> IoCapabilities {
-        IoCapabilities::DisplayOnly
-    }
-
-    fn can_bond(&self, _conn: &Connection) -> bool {
-        true
-    }
-
-    fn display_passkey(&self, passkey: &[u8; 6]) {
-        info!("The passkey is \"{:a}\"", passkey)
-    }
-
-    fn on_bonded(
-        &self,
-        _conn: &Connection,
-        master_id: MasterId,
-        key: EncryptionInfo,
-        peer_id: IdentityKey,
-    ) {
-        debug!("storing bond for: id: {}, key: {}", master_id, key);
-
-        // In a real application you would want to signal another task to permanently store the keys in non-volatile memory here.
-        self.sys_attrs.borrow_mut().clear();
-        self.peer.set(Some(Peer {
-            master_id,
-            key,
-            peer_id,
-        }));
-    }
-
-    fn get_key(&self, _conn: &Connection, master_id: MasterId) -> Option<EncryptionInfo> {
-        debug!("getting bond for: id: {}", master_id);
-
-        self.peer
-            .get()
-            .and_then(|peer| (master_id == peer.master_id).then_some(peer.key))
-    }
-
-    fn save_sys_attrs(&self, conn: &Connection) {
-        debug!("saving system attributes for: {}", conn.peer_address());
-
-        if let Some(peer) = self.peer.get() {
-            if peer.peer_id.is_match(conn.peer_address()) {
-                let mut sys_attrs = self.sys_attrs.borrow_mut();
-                let capacity = sys_attrs.capacity();
-                //  unwrap!(sys_attrs.resize(capacity, 0));
-                let len = unwrap!(gatt_server::get_sys_attrs(conn, &mut sys_attrs)) as u16;
-                sys_attrs.truncate(usize::from(len));
-                // In a real application you would want to signal another task to permanently store sys_attrs for this connection's peer
-            }
-        }
-    }
-
-    fn load_sys_attrs(&self, conn: &Connection) {
-        let addr = conn.peer_address();
-        debug!("loading system attributes for: {}", addr);
-
-        let attrs = self.sys_attrs.borrow();
-        // In a real application you would search all stored peers to find a match
-        let attrs = if self
-            .peer
-            .get()
-            .map(|peer| peer.peer_id.is_match(addr))
-            .unwrap_or(false)
-        {
-            (!attrs.is_empty()).then_some(attrs.as_slice())
-        } else {
-            None
-        };
-
-        unwrap!(set_sys_attrs(conn, attrs));
-    }
-}
 
 #[derive(Debug, Clone, Copy, Format)]
 pub struct CharachteristicHandle<T: core::convert::AsRef<[u8]> + Sized> {
@@ -293,7 +56,7 @@ where
         gatt_server::set_value(sd, self.value_handle, bytes)
     }
 
-    pub fn value_notift(&self, conn: &Connection, value: &T) -> Result<(), NotifyValueError> {
+    pub fn value_notify(&self, conn: &Connection, value: &T) -> Result<(), NotifyValueError> {
         let bytes = value.as_ref();
         gatt_server::notify_value(conn, self.value_handle, bytes)
     }
@@ -428,7 +191,6 @@ pub struct HIDService {
     service_handle: u16,
     protocol_mode: CharachteristicHandle<[u8; 1]>,
     pub report: CharachteristicHandle<[u8; 8]>,
-    cccd: u16,
     report_map: CharachteristicHandle<[u8; 45]>,
     hid_information: CharachteristicHandle<[u8; 4]>,
     hid_control_point: CharachteristicHandle<[u8; 1]>,
@@ -442,26 +204,24 @@ impl HIDService {
             &mut service_builder,
             Uuid::new_16(0x2A4E),
             Attribute::new([0x01u8]).security(SecurityMode::Open),
-            Metadata::new(Properties::new().read()),
+            Metadata::new(Properties::new().read().write_without_response()),
         )?;
 
         let mut x = service_builder.add_characteristic(
             Uuid::new_16(0x2A4D),
             Attribute::new([0u8; 8]).security(SecurityMode::Mitm),
-            Metadata::new(Properties::new().notify().read().write().signed_write()),
+            Metadata::new(Properties::new().notify().read().write()),
         )?;
-
-        let client_characteristic_configuration = x.add_descriptor(
-            Uuid::new_16(2902),
-            Attribute::new([0x0, 0x01])
-                .security(SecurityMode::Mitm)
-                .write_security(SecurityMode::Mitm),
-        )?;
-
-        let report_reference = x.add_descriptor(
-            Uuid::new_16(0x2908),
-            Attribute::new([0x0, 0x00]).security(SecurityMode::Mitm),
-        )?;
+        /*
+                let client_characteristic_configuration = x.add_descriptor(
+                    Uuid::new_16(2902),
+                    Attribute::new([0x0, 0x00])
+                        .security(SecurityMode::Mitm)
+                        .write_security(SecurityMode::Mitm),
+                )?;
+        */
+        let report_reference =
+            x.add_descriptor(Uuid::new_16(0x2908), Attribute::new([0x1, 0x01]))?;
 
         let report = x.build();
 
@@ -495,7 +255,7 @@ impl HIDService {
             .security(SecurityMode::Mitm),
             Metadata::new(Properties::new().read()),
         )?;
-        x.add_descriptor(
+        let external_report_reference = x.add_descriptor(
             Uuid::new_16(0x2907),
             Attribute::new([0x0; 2]).security(SecurityMode::Mitm),
         )?;
@@ -520,7 +280,6 @@ impl HIDService {
             service_handle: service_builder.build().handle(),
             protocol_mode,
             report: report.into(),
-            cccd: client_characteristic_configuration.handle(),
             report_map: report_map.into(),
             hid_information,
             hid_control_point,

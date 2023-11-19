@@ -1,4 +1,6 @@
 use defmt::{info, unwrap};
+use ekv::config::PAGE_SIZE;
+use ekv::WriteTransaction;
 use ekv::{CommitError, Database, ReadError, WriteError};
 use embassy_nrf::{
     peripherals::QSPI,
@@ -6,9 +8,6 @@ use embassy_nrf::{
 };
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use serde::{de::DeserializeOwned, Serialize};
-use thiserror::Error;
-const PAGE_SIZE: usize = 4096;
-
 // Workaround for alignment requirements.
 // Nicer API will probably come in the future.
 #[repr(C, align(4))]
@@ -90,12 +89,11 @@ impl<'a> ekv::flash::Flash for FlashCtrl<'a> {
 
 pub async fn init_db<'a>(
     mut q: Qspi<'a, QSPI>,
-    seed: u32,
 ) -> Database<FlashCtrl<'a>, CriticalSectionRawMutex> {
     init_qspi(&mut q).await;
     let flash = FlashCtrl::new(q);
 
-    let mut config = ekv::Config::default();
+    let config = ekv::Config::default();
 
     let db: Database<FlashCtrl<'_>, CriticalSectionRawMutex> = ekv::Database::new(flash, config);
 
@@ -154,15 +152,8 @@ pub trait SerdeDB {
         &self,
         key: impl AsRef<[u8]>,
         val: &T,
+        wtx: &mut WriteTransaction<'_, FlashCtrl<'_>, CriticalSectionRawMutex>,
     ) -> Result<(), Self::WriteError>;
-
-    async fn read_key<T: DeserializeOwned + DBKey>(&self) -> Result<T, Self::ReadError> {
-        self.read(T::KEY).await
-    }
-
-    async fn write_key<T: Serialize + DBKey>(&self, val: &T) -> Result<(), Self::WriteError> {
-        self.write(T::KEY, val).await
-    }
 }
 
 impl SerdeDB for Database<FlashCtrl<'_>, CriticalSectionRawMutex> {
@@ -183,19 +174,16 @@ impl SerdeDB for Database<FlashCtrl<'_>, CriticalSectionRawMutex> {
         &self,
         key: impl AsRef<[u8]>,
         val: &T,
+        wtx: &mut WriteTransaction<'_, FlashCtrl<'_>, CriticalSectionRawMutex>,
     ) -> Result<(), Self::WriteError> {
-        let mut wtx = self.write_transaction().await;
         let mut buf = [0u8; ekv::config::MAX_VALUE_SIZE];
         let buf = postcard::to_slice(val, &mut buf)?;
-
         wtx.write(key.as_ref(), buf).await?;
-
-        wtx.commit().await?;
 
         Ok(())
     }
 }
 
 pub trait DBKey {
-    const KEY: &'static [u8];
+    fn key(&self) -> &[u8];
 }

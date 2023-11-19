@@ -4,31 +4,28 @@
 #![feature(generic_const_exprs)]
 #![feature(error_in_core)]
 
+pub mod ble;
 pub mod kvstore;
-pub mod softdevice;
-
 extern crate alloc;
 
-use core::mem;
-
 use alloc::string::String;
-use defmt::{info, println};
+use ble::{gatt::GATTServer, softdevice};
+use defmt::info;
 use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_nrf::{
     self as _, bind_interrupts,
-    interrupt::{self, Interrupt, InterruptExt, Priority},
+    interrupt::{Interrupt, InterruptExt, Priority},
     peripherals::{self},
     qspi::{self, Frequency, Qspi},
-    rng::Rng,
 };
+use embassy_time::Timer;
 use embedded_alloc::Heap;
 use kvstore::init_db;
-use kvstore::SerdeDB;
 use nrf_softdevice::{self as _, Softdevice};
 use panic_probe as _;
 use serde::{Deserialize, Serialize};
-use softdevice::{AdvData, GATTServer}; // time driver
+
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
 
@@ -45,11 +42,10 @@ async fn main(spawner: Spawner) {
     let mut buf = [0u8; 4];
     let _ = nrf_softdevice::random_bytes(sd, &mut buf);
 
-    let db = init_db(qspi, u32::from_be_bytes(buf)).await;
+    let db = init_db(qspi).await;
 
-    let data: AdvData = db.read_key().await.expect("Failed to read config");
-
-    info!("Device Name {}", data.name.as_str());
+    //  let data: AdvData = db.read_key().await.expect("Failed to read config");
+    // info!("Device Name {}", data.name.as_str());
 
     init_bt(spawner, sd, server).await;
 }
@@ -104,19 +100,24 @@ async fn init_bt(spawner: Spawner, sd: &Softdevice, server: GATTServer) {
         .expect("failed to advertise");
     info!("Advertising Completed");
 
-    spawner.must_spawn(softdevice::gatt_task(con.clone(), server.clone()));
-    info!("GATT Server Spawned");
-    /*  loop {
-        let mut report = [0x0u8; 8];
-        report[2] = 0x04;
+    spawner.must_spawn(crate::ble::gatt_task(con.clone(), server.clone()));
+    Timer::after_secs(30).await;
+    let mut buf = [0u8; 8];
+    loop {
+        buf[2] = 0x0;
+        info!(
+            "Sent Report: {=[u8]:#X} - Status :{}",
+            buf,
+            server.hid.report.value_notify(&con, &buf)
+        );
+        Timer::after_millis(500).await;
 
+        buf[2] = 0x04;
 
-       /* */ match server.hid.report.value_notift(&con, &report) {
-            Err(e) => {
-                info!("{}", e);
-            }
-            _ => {}
-        }
-        info!("Wrote report");
-    } */
+        info!(
+            "Sent Report: {=[u8]:#X} - Status :{}",
+            buf,
+            server.hid.report.value_notify(&con, &buf)
+        );
+    }
 }

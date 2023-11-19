@@ -56,6 +56,8 @@ rand_core = "0.6.4"
 serde = { version = "1.0", default-features = false, features = ["derive","alloc"] }
 postcard = "1.0.8"
 thiserror = { version = "1.0", package = "thiserror-core", default-features = false }
+static_cell = "2.0.0"
+usbd-hid = "0.7.0"
 
 [patch.crates-io]
 embassy-sync = { git = "https://github.com/embassy-rs/embassy", rev = "3477cc6bbd45c66f36af18f72607f54c059ee3ca" }
