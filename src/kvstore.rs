@@ -1,4 +1,4 @@
-use defmt::{info, unwrap};
+use defmt::{info, unwrap, Format};
 use ekv::config::PAGE_SIZE;
 use ekv::WriteTransaction;
 use ekv::{CommitError, Database, ReadError, WriteError};
@@ -6,48 +6,47 @@ use embassy_nrf::{
     peripherals::QSPI,
     qspi::{Error as FlashError, Qspi},
 };
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use serde::{de::DeserializeOwned, Serialize};
-// Workaround for alignment requirements.
-// Nicer API will probably come in the future.
-#[repr(C, align(4))]
-struct AlignedBuf([u8; PAGE_SIZE]);
+use static_cell::StaticCell;
 
+//https://www.mxic.com.tw/Lists/Datasheet/Attachments/8868/MX25R6435F,%20Wide%20Range,%2064Mb,%20v1.6.pdf
 async fn init_qspi(q: &mut Qspi<'_, QSPI>) {
     let mut id = [1; 3];
     unwrap!(q.custom_instruction(0x9F, &[], &mut id).await);
-    info!("QSPI id: {}", id);
+    info!("id: {}", id);
 
     // Read status register
     let mut status = [4; 1];
     unwrap!(q.custom_instruction(0x05, &[], &mut status).await);
 
-    info!("QSPI status: {:?}", status[0]);
+    info!("status: {:?}", status[0]);
 
     if status[0] & 0x40 == 0 {
         status[0] |= 0x40;
 
         unwrap!(q.custom_instruction(0x01, &status, &mut []).await);
 
-        info!("QSPI enabled quad in status");
+        info!("enabled quad in status");
+    }
+    info!("QSPI Initalized")
+}
+// Workaround for alignment requirements.
+#[repr(C, align(4))]
+struct AlignedBuf([u8; PAGE_SIZE]);
+
+static mut BUF: AlignedBuf = AlignedBuf([0; 4096]);
+pub struct FlashCtrl {
+    qspi: Qspi<'static, QSPI>,
+}
+
+impl FlashCtrl {
+    pub fn new(qspi: Qspi<'static, QSPI>) -> FlashCtrl {
+        Self { qspi }
     }
 }
 
-pub struct FlashCtrl<'a> {
-    qspi: Qspi<'a, QSPI>,
-    buf: AlignedBuf,
-}
-
-impl<'a> FlashCtrl<'a> {
-    pub fn new(qspi: Qspi<'a, QSPI>) -> FlashCtrl<'a> {
-        Self {
-            qspi,
-            buf: AlignedBuf([0; PAGE_SIZE]),
-        }
-    }
-}
-
-impl<'a> ekv::flash::Flash for FlashCtrl<'a> {
+impl ekv::flash::Flash for FlashCtrl {
     type Error = embassy_nrf::qspi::Error;
 
     fn page_count(&self) -> usize {
@@ -65,10 +64,13 @@ impl<'a> ekv::flash::Flash for FlashCtrl<'a> {
         data: &mut [u8],
     ) -> Result<(), Self::Error> {
         let address = page_id.index() * PAGE_SIZE + offset;
-        self.qspi
-            .read(address as u32, &mut self.buf.0[..data.len()])
-            .await?;
-        data.copy_from_slice(&self.buf.0[..data.len()]);
+        unsafe {
+            self.qspi
+                .read(address as u32, &mut BUF.0[..data.len()])
+                .await
+                .unwrap();
+            data.copy_from_slice(&BUF.0[..data.len()])
+        }
         Ok(())
     }
 
@@ -80,31 +82,18 @@ impl<'a> ekv::flash::Flash for FlashCtrl<'a> {
     ) -> Result<(), Self::Error> {
         let address = page_id.index() * PAGE_SIZE + offset;
 
-        self.buf.0[..data.len()].copy_from_slice(data);
-        self.qspi
-            .write(address as u32, &self.buf.0[..data.len()])
-            .await
+        unsafe {
+            BUF.0[..data.len()].copy_from_slice(data);
+            self.qspi
+                .write(address as u32, &BUF.0[..data.len()])
+                .await
+                .unwrap();
+        }
+        Ok(())
     }
 }
 
-pub async fn init_db<'a>(
-    mut q: Qspi<'a, QSPI>,
-) -> Database<FlashCtrl<'a>, CriticalSectionRawMutex> {
-    init_qspi(&mut q).await;
-    let flash = FlashCtrl::new(q);
-
-    let config = ekv::Config::default();
-
-    let db: Database<FlashCtrl<'_>, CriticalSectionRawMutex> = ekv::Database::new(flash, config);
-
-    if db.mount().await.is_err() {
-        info!("Formatting DB");
-        db.format().await.expect("Failed for format DB");
-    }
-
-    db
-}
-#[derive(Debug)]
+#[derive(Debug, Format)]
 pub enum DBReadError {
     IO(ReadError<FlashError>),
     Deserialize(postcard::Error),
@@ -119,7 +108,7 @@ impl From<ReadError<FlashError>> for DBReadError {
         DBReadError::IO(value)
     }
 }
-#[derive(Debug)]
+#[derive(Debug, Format)]
 pub enum DBWriteError {
     WriteError(WriteError<FlashError>),
     CommitError(CommitError<FlashError>),
@@ -152,11 +141,11 @@ pub trait SerdeDB {
         &self,
         key: impl AsRef<[u8]>,
         val: &T,
-        wtx: &mut WriteTransaction<'_, FlashCtrl<'_>, CriticalSectionRawMutex>,
+        wtx: &mut WriteTransaction<'_, FlashCtrl, NoopRawMutex>,
     ) -> Result<(), Self::WriteError>;
 }
 
-impl SerdeDB for Database<FlashCtrl<'_>, CriticalSectionRawMutex> {
+impl SerdeDB for Database<FlashCtrl, NoopRawMutex> {
     type ReadError = DBReadError;
     type WriteError = DBWriteError;
 
@@ -174,7 +163,7 @@ impl SerdeDB for Database<FlashCtrl<'_>, CriticalSectionRawMutex> {
         &self,
         key: impl AsRef<[u8]>,
         val: &T,
-        wtx: &mut WriteTransaction<'_, FlashCtrl<'_>, CriticalSectionRawMutex>,
+        wtx: &mut WriteTransaction<'_, FlashCtrl, NoopRawMutex>,
     ) -> Result<(), Self::WriteError> {
         let mut buf = [0u8; ekv::config::MAX_VALUE_SIZE];
         let buf = postcard::to_slice(val, &mut buf)?;
@@ -186,4 +175,27 @@ impl SerdeDB for Database<FlashCtrl<'_>, CriticalSectionRawMutex> {
 
 pub trait DBKey {
     fn key(&self) -> &[u8];
+}
+
+pub type KVStore = Database<FlashCtrl, NoopRawMutex>;
+
+static KVSTORE: StaticCell<KVStore> = StaticCell::new();
+
+pub async fn init_kvstore(mut q: Qspi<'static, QSPI>) -> &'static KVStore {
+    init_qspi(&mut q).await;
+    let flash = FlashCtrl::new(q);
+
+    let config = ekv::Config::default();
+
+    let db: Database<FlashCtrl, NoopRawMutex> = ekv::Database::new(flash, config);
+    db.format().await.expect("formatting failed");
+    if db.mount().await.is_err() {
+        info!("Formatting DB");
+        db.format().await.expect("Failed for format DB");
+    }
+
+    let db = KVSTORE.init(db);
+    info!("Initalized KV store");
+
+    db
 }

@@ -257,6 +257,7 @@ name = "ekv"
 version = "0.1.0"
 source = "git+https://github.com/embassy-rs/ekv?rev=d24ac27#d24ac27eabbfda027c21167f9e9dcf73887de3e1"
 dependencies = [
+ "defmt",
  "embassy-sync 0.3.0",
  "heapless",
 ]
@@ -701,6 +702,7 @@ dependencies = [
  "embassy-time",
  "embassy-usb",
  "embedded-alloc",
+ "futures",
  "nrf-softdevice",
  "nrf-softdevice-s140 0.1.1 (git+https://github.com/embassy-rs/nrf-softdevice)",
  "panic-probe",
@@ -709,6 +711,7 @@ dependencies = [
  "serde",
  "static_cell",
  "thiserror-core",
+ "tinyvec",
  "usbd-hid 0.7.0",
 ]
 
@@ -949,6 +952,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a55c51ee6c0db07e68448e336cf8ea4131a620edefebf9893e759b2d793420f8"
 dependencies = [
  "cobs",
+ "defmt",
  "heapless",
  "serde",
 ]
@@ -1195,6 +1199,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.39",
+]
+
+[[package]]
+name = "tinyvec"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87cc5ceb3875bb20c2890005a4e226a4651264a5c75edb2421b52861a0a0cb50"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

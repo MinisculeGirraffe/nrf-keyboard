@@ -5,26 +5,37 @@
 #![feature(error_in_core)]
 
 pub mod ble;
+pub mod gpio;
 pub mod kvstore;
 extern crate alloc;
-
 use alloc::string::String;
-use ble::{gatt::GATTServer, softdevice};
+use ble::{
+    bonder::Bonder,
+    gatt::GATTServer,
+    softdevice::{self, AdvData},
+};
 use defmt::info;
 use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_nrf::{
     self as _, bind_interrupts,
+    gpio::{AnyPin, Input, Pin},
     interrupt::{Interrupt, InterruptExt, Priority},
     peripherals::{self},
     qspi::{self, Frequency, Qspi},
 };
 use embassy_time::Timer;
 use embedded_alloc::Heap;
-use kvstore::init_db;
-use nrf_softdevice::{self as _, Softdevice};
+use futures::future::{select, Either};
+use futures::pin_mut;
+use gpio::button_task;
+use kvstore::{init_kvstore, KVStore};
+use nrf_softdevice::{self as _, ble::gatt_server, gatt_server, Softdevice};
 use panic_probe as _;
 use serde::{Deserialize, Serialize};
+use static_cell::StaticCell;
+
+use crate::ble::softdevice::sync_peers;
 
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
@@ -36,18 +47,12 @@ bind_interrupts!(struct QSPIIRQ {
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     init_heap();
-    let qspi = init_peripherials();
-    let (server, sd) = softdevice::init(spawner);
+    let (qspi, btn) = init_peripherials();
+    let db = init_kvstore(qspi).await;
 
-    let mut buf = [0u8; 4];
-    let _ = nrf_softdevice::random_bytes(sd, &mut buf);
+    let (sd, gatt, bonder, adv) = softdevice::init(spawner, db).await;
 
-    let db = init_db(qspi).await;
-
-    //  let data: AdvData = db.read_key().await.expect("Failed to read config");
-    // info!("Device Name {}", data.name.as_str());
-
-    init_bt(spawner, sd, server).await;
+    init_bt(spawner, sd, &gatt, bonder, adv, btn, db).await;
 }
 #[derive(Debug, Deserialize, Serialize)]
 struct DeviceConfig {
@@ -63,7 +68,10 @@ fn init_heap() {
     info!("Heap Initalized: Size: {}", HEAP_SIZE);
 }
 
-fn init_peripherials<'a>() -> Qspi<'a, embassy_nrf::peripherals::QSPI> {
+fn init_peripherials<'a>() -> (
+    Qspi<'a, embassy_nrf::peripherals::QSPI>,
+    Input<'static, AnyPin>,
+) {
     Interrupt::RNG.set_priority(Priority::P3);
     let mut config = embassy_nrf::config::Config::default();
     config.gpiote_interrupt_priority = Priority::P2;
@@ -89,35 +97,40 @@ fn init_peripherials<'a>() -> Qspi<'a, embassy_nrf::peripherals::QSPI> {
         p.QSPI, QSPIIRQ, p.P1_03, p.P1_06, p.P1_05, p.P1_04, p.P1_02, p.P1_01, config,
     );
 
-    qspi
-}
+    let btn = Input::new(p.P1_00.degrade(), embassy_nrf::gpio::Pull::Up);
 
-async fn init_bt(spawner: Spawner, sd: &Softdevice, server: GATTServer) {
+    (qspi, btn)
+}
+static BONDER: StaticCell<Bonder> = StaticCell::new();
+async fn init_bt(
+    spawner: Spawner,
+    sd: &'static Softdevice,
+    server: &GATTServer,
+    bonder: Bonder,
+    adv: AdvData,
+    mut btn: Input<'static, AnyPin>,
+    db: &'static KVStore,
+) {
     info!("Softdevice initialized");
     info!("Server: {}", server);
-    let con = softdevice::advertise(&sd)
-        .await
-        .expect("failed to advertise");
-    info!("Advertising Completed");
+    let bonder = BONDER.init(bonder);
 
-    spawner.must_spawn(crate::ble::gatt_task(con.clone(), server.clone()));
-    Timer::after_secs(30).await;
-    let mut buf = [0u8; 8];
     loop {
-        buf[2] = 0x0;
-        info!(
-            "Sent Report: {=[u8]:#X} - Status :{}",
-            buf,
-            server.hid.report.value_notify(&con, &buf)
-        );
-        Timer::after_millis(500).await;
+        let con = softdevice::advertise(&sd, &adv, bonder)
+            .await
+            .expect("failed to advertise");
 
-        buf[2] = 0x04;
+        info!("Advertising Completed");
+        info!("Spawning GATT Server");
 
-        info!(
-            "Sent Report: {=[u8]:#X} - Status :{}",
-            buf,
-            server.hid.report.value_notify(&con, &buf)
-        );
+        let gatt_fut = gatt_server::run(&con, server, |f| {});
+        let btn_fut = button_task(1, &mut btn, server, &con);
+
+        pin_mut!(gatt_fut);
+        pin_mut!(btn_fut);
+
+        select(gatt_fut, btn_fut).await;
+        //con.disconnect().expect("Failed to disconnect");
+        info!("Gatt Server exited")
     }
 }

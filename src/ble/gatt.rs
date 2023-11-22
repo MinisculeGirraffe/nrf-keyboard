@@ -14,6 +14,7 @@ use nrf_softdevice::{
     },
     Softdevice,
 };
+use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
 
 #[derive(Debug, Clone, Copy, Format)]
 pub struct CharachteristicHandle<T: core::convert::AsRef<[u8]> + Sized> {
@@ -191,7 +192,7 @@ pub struct HIDService {
     service_handle: u16,
     protocol_mode: CharachteristicHandle<[u8; 1]>,
     pub report: CharachteristicHandle<[u8; 8]>,
-    report_map: CharachteristicHandle<[u8; 45]>,
+    report_map: CharachteristicHandle<[u8; 41]>,
     hid_information: CharachteristicHandle<[u8; 4]>,
     hid_control_point: CharachteristicHandle<[u8; 1]>,
 }
@@ -224,34 +225,10 @@ impl HIDService {
             x.add_descriptor(Uuid::new_16(0x2908), Attribute::new([0x1, 0x01]))?;
 
         let report = x.build();
-
+   
         let mut x = service_builder.add_characteristic(
             Uuid::new_16(0x2A4B),
-            Attribute::new([
-                0x05, 0x01, // Usage Page (Generic Desktop)
-                0x09, 0x06, // Usage (Keyboard)
-                0xa1, 0x01, // Collection (Application)
-                0x05, 0x07, // Usage Page (Keyboard)
-                0x19, 0xe0, // Usage Minimum (Keyboard LeftControl)
-                0x29, 0xe7, // Usage Maximum (Keyboard Right GUI)
-                0x15, 0x00, // Logical Minimum (0)
-                0x25, 0x01, // Logical Maximum (1)
-                0x75, 0x01, // Report Size (1)
-                0x95, 0x08, // Report Count (8)
-                0x81, 0x02, // Input (Data, Variable, Absolute) Modifier byte
-                0x95, 0x01, // Report Count (1)
-                0x75, 0x08, // Report Size (8)
-                0x81, 0x01, // Input (Constant) Reserved byte
-                0x95, 0x06, // Report Count (6)
-                0x75, 0x08, // Report Size (8)
-                0x15, 0x00, // Logical Minimum (0)
-                0x25, 0x65, // Logical Maximum (101)
-                0x05, 0x07, // Usage Page (Key Codes)
-                0x05, 0x01, // Usage Minimum (Reserved (no event indicated))
-                0x05, 0x01, // Usage Maximum (Keyboard Application)
-                0x05, 0x01, // Input (Data,Array) Key arrays (6 bytes)
-                0xc0, // End Collection
-            ])
+            Attribute::new(     KeyboardReport::desc());
             .security(SecurityMode::Mitm),
             Metadata::new(Properties::new().read()),
         )?;

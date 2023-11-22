@@ -1,23 +1,25 @@
+use super::{
+    bonder::{Bonder, KnownPeers},
+    gatt::GATTServer,
+    BATTERY_SERVICE, DEVICE_INFO_SERVICE, HID_SERVICE,
+};
+use crate::kvstore::{DBReadError, KVStore, SerdeDB};
 use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-use defmt::info;
+use defmt::{error, info};
 use embassy_executor::Spawner;
 use nrf_softdevice::{
     ble::{
+        self,
         peripheral::{self, AdvertiseError},
-        Connection,
+        Address, Connection, IdentityKey, IdentityResolutionKey,
     },
     raw, Softdevice,
 };
 use nrf_softdevice_s140::*;
 use serde::{Deserialize, Serialize};
-use static_cell::StaticCell;
-
-use crate::kvstore::DBKey;
-
-use super::{bonder::Bonder, gatt::GATTServer, BATTERY_SERVICE, DEVICE_INFO_SERVICE, HID_SERVICE};
 
 #[embassy_executor::task]
 pub async fn softdevice_task(sd: &'static Softdevice) -> ! {
@@ -54,39 +56,89 @@ fn softdevice_config() -> nrf_softdevice::Config {
             _bitfield_1: raw::ble_gap_cfg_device_name_t::new_bitfield_1(
                 raw::BLE_GATTS_VLOC_STACK as u8,
             ),
-            p_value: b"HelloWorld" as *const u8 as _,
-            current_len: 10,
-            max_len: 10,
+            p_value: b"Rust Keyboard" as *const u8 as _,
+            current_len: 13,
+            max_len: 13,
         }),
         ..Default::default()
     }
 }
 
-pub fn init(spawner: Spawner) -> (GATTServer, &'static Softdevice) {
-    let config = softdevice_config();
+pub async fn sync_peers(sd: &Softdevice, db: &'static KVStore) {
+    let known_peers: Result<KnownPeers, DBReadError> = db.read(KnownPeers::KEY).await;
 
-    let sd = Softdevice::enable(&config);
-    let server = GATTServer::new(sd).expect("failed to create GATT server");
-    spawner.must_spawn(softdevice_task(sd));
+    if let Err(ref e) = known_peers {
+        error!("{}", e);
+        match e {
+            DBReadError::IO(ref e) => match e {
+                ekv::ReadError::KeyNotFound => {
+                    let mut wtx = db.write_transaction().await;
+                    db.write(KnownPeers::KEY, &KnownPeers::default(), &mut wtx)
+                        .await;
+                    wtx.commit().await.expect("Failed to commit");
+                }
+                _ => panic!("DB Error"),
+            },
+            _ => {}
+        }
+    }
 
-    (server, sd)
+    let known_peers = known_peers.unwrap_or_default();
+    info!("Known Peers: {}", known_peers);
+    let id_keys: Vec<IdentityKey> = known_peers
+        .iter()
+        .filter_map(|i| *i)
+        .map(|peer| peer.peer_id)
+        .collect();
+
+    let irks: Vec<IdentityResolutionKey> = known_peers
+        .iter()
+        .filter_map(|i| *i)
+        .map(|i| i.peer_id.irk)
+        .collect();
+    // ble::set_device_identities_list(&sd, id_keys.as_slice(), Some(irks.as_slice())).unwrap();
+
+    let addrs: Vec<Address> = known_peers
+        .iter()
+        .filter_map(|i| *i)
+        .map(|p| p.peer_id.addr)
+        .collect();
+    //ble::set_whitelist(&sd, addrs.as_slice()).expect("Failed");
 }
 
-static BONDER: StaticCell<Bonder> = StaticCell::new();
+pub async fn init(
+    spawner: Spawner,
+    db: &'static KVStore,
+) -> (&'static Softdevice, GATTServer, Bonder, AdvData) {
+    let adv_data: AdvData = db.read(AdvData::KEY).await.unwrap_or_default();
+    let config = softdevice_config();
+    let sd = Softdevice::enable(&config);
 
-pub async fn advertise(sd: &Softdevice) -> Result<Connection, AdvertiseError> {
+    let server = GATTServer::new(sd).expect("failed to create GATT server");
+    sync_peers(&sd, db).await;
+    let known_peers: KnownPeers = db.read(KnownPeers::KEY).await.expect("failed");
+    info!("Known Peers {}", known_peers);
+    let bonder = Bonder::new(known_peers);
+
+    bonder.spawn_task(spawner, db);
+    spawner.must_spawn(softdevice_task(sd));
+
+    (sd, server, bonder, adv_data)
+}
+
+pub async fn advertise(
+    sd: &Softdevice,
+    adv: &AdvData,
+    bonder: &'static Bonder,
+) -> Result<Connection, AdvertiseError> {
     let config = peripheral::Config::default();
-
-    let adv = AdvData::default().to_bytes();
-
-    let adv_data = adv.as_slice();
-
-    info!("Advertising: {=[u8]:#X}", &adv_data);
+    let adv = adv.to_bytes();
     let adv = peripheral::ConnectableAdvertisement::ScannableUndirected {
-        adv_data,
+        adv_data: adv.as_slice(),
         scan_data: &[],
     };
-    let bonder = BONDER.init(Bonder::default());
+
+    info!("Advertising Started");
     peripheral::advertise_pairable(sd, adv, &config, bonder).await
 }
 
@@ -111,12 +163,8 @@ impl Default for AdvData {
     }
 }
 
-impl DBKey for AdvData {
-    fn key(&self) -> &[u8] {
-        b"AdvData"
-    }
-}
 impl AdvData {
+    pub const KEY: &'static [u8] = b"AdvData";
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut data = Vec::new();
         data.push(2);
