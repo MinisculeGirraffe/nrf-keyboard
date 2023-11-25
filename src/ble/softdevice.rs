@@ -64,7 +64,8 @@ fn softdevice_config() -> nrf_softdevice::Config {
     }
 }
 
-pub async fn sync_peers(sd: &Softdevice, db: &'static KVStore) {
+pub async fn sync_peers(sd: &Softdevice, db: &'static KVStore) -> KnownPeers {
+    /*
     let known_peers: Result<KnownPeers, DBReadError> = db.read(KnownPeers::KEY).await;
 
     if let Err(ref e) = known_peers {
@@ -82,8 +83,9 @@ pub async fn sync_peers(sd: &Softdevice, db: &'static KVStore) {
             _ => {}
         }
     }
+    */
 
-    let known_peers = known_peers.unwrap_or_default();
+    let known_peers = KnownPeers::default();
     info!("Known Peers: {}", known_peers);
     let id_keys: Vec<IdentityKey> = known_peers
         .iter()
@@ -104,6 +106,8 @@ pub async fn sync_peers(sd: &Softdevice, db: &'static KVStore) {
         .map(|p| p.peer_id.addr)
         .collect();
     //ble::set_whitelist(&sd, addrs.as_slice()).expect("Failed");
+
+    known_peers
 }
 
 pub async fn init(
@@ -115,8 +119,8 @@ pub async fn init(
     let sd = Softdevice::enable(&config);
 
     let server = GATTServer::new(sd).expect("failed to create GATT server");
-    sync_peers(&sd, db).await;
-    let known_peers: KnownPeers = db.read(KnownPeers::KEY).await.expect("failed");
+    let known_peers = sync_peers(&sd, db).await;
+
     info!("Known Peers {}", known_peers);
     let bonder = Bonder::new(known_peers);
 
@@ -133,10 +137,11 @@ pub async fn advertise(
 ) -> Result<Connection, AdvertiseError> {
     let config = peripheral::Config::default();
     let adv = adv.to_bytes();
-    let adv = peripheral::ConnectableAdvertisement::ScannableUndirected {
-        adv_data: adv.as_slice(),
-        scan_data: &[],
-    };
+    let adv =
+        peripheral::ConnectableAdvertisement::ScannableUndirected {
+            adv_data: adv.as_slice(),
+            scan_data: &[],
+        };
 
     info!("Advertising Started");
     peripheral::advertise_pairable(sd, adv, &config, bonder).await

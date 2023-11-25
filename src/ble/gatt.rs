@@ -14,7 +14,8 @@ use nrf_softdevice::{
     },
     Softdevice,
 };
-use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
+use packed_struct::PackedStruct;
+use usbd_human_interface_device::device::keyboard::{BootKeyboardReport, BOOT_KEYBOARD_REPORT_DESCRIPTOR};
 
 #[derive(Debug, Clone, Copy, Format)]
 pub struct CharachteristicHandle<T: core::convert::AsRef<[u8]> + Sized> {
@@ -192,7 +193,7 @@ pub struct HIDService {
     service_handle: u16,
     protocol_mode: CharachteristicHandle<[u8; 1]>,
     pub report: CharachteristicHandle<[u8; 8]>,
-    report_map: CharachteristicHandle<[u8; 41]>,
+    report_map: CharachteristicHandle<[u8; 65]>,
     hid_information: CharachteristicHandle<[u8; 4]>,
     hid_control_point: CharachteristicHandle<[u8; 1]>,
 }
@@ -210,9 +211,11 @@ impl HIDService {
 
         let mut x = service_builder.add_characteristic(
             Uuid::new_16(0x2A4D),
-            Attribute::new([0u8; 8]).security(SecurityMode::Mitm),
+            Attribute::new(BootKeyboardReport::default().pack().unwrap_or_default())
+                .security(SecurityMode::Mitm),
             Metadata::new(Properties::new().notify().read().write()),
         )?;
+
         /*
                 let client_characteristic_configuration = x.add_descriptor(
                     Uuid::new_16(2902),
@@ -222,13 +225,15 @@ impl HIDService {
                 )?;
         */
         let report_reference =
-            x.add_descriptor(Uuid::new_16(0x2908), Attribute::new([0x1, 0x01]))?;
+            x.add_descriptor(Uuid::new_16(0x2908), Attribute::new([0x0, 0x01]))?;
 
         let report = x.build();
-   
+                
         let mut x = service_builder.add_characteristic(
             Uuid::new_16(0x2A4B),
-            Attribute::new(     KeyboardReport::desc());
+            Attribute::new(
+                BOOT_KEYBOARD_REPORT_DESCRIPTOR,
+            )
             .security(SecurityMode::Mitm),
             Metadata::new(Properties::new().read()),
         )?;

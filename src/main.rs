@@ -5,6 +5,7 @@
 #![feature(error_in_core)]
 
 pub mod ble;
+pub mod debouncer;
 pub mod gpio;
 pub mod kvstore;
 extern crate alloc;
@@ -116,7 +117,7 @@ async fn init_bt(
     let bonder = BONDER.init(bonder);
 
     loop {
-        let con = softdevice::advertise(&sd, &adv, bonder)
+        let con = softdevice::advertise(sd, &adv, bonder)
             .await
             .expect("failed to advertise");
 
@@ -134,3 +135,4 @@ async fn init_bt(
         info!("Gatt Server exited")
     }
 }
+

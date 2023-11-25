@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use static_cell::StaticCell;
 use tinyvec::ArrayVec;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Format)]
+#[derive(Debug, Clone, Copy, Format)]
 
 pub struct Peer {
     pub master_id: MasterId,
@@ -171,7 +171,7 @@ enum BonderMessage {
     Store(KnownPeers),
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, Format)]
+#[derive(Debug, Clone, Copy, Default, Format)]
 pub struct KnownPeers([Option<Peer>; 3]);
 
 impl KnownPeers {
@@ -230,12 +230,15 @@ pub async fn bonder_task(recv: BonderReceiver, db: &'static KVStore) {
         let msg = recv.receive().await;
         info!("Got Bonder Message: {}", msg);
         let result = match msg {
-            BonderMessage::Store(peers) => { 
-                 let mut wtx = db.write_transaction().await;
-                 db.write(KnownPeers::KEY, &peers, &mut wtx)
-                     .await
-                     .expect("Failed to write");
-                 wtx.commit().await.expect("Failed to write") 
+            BonderMessage::Store(peers) => {
+
+                /*   let mut wtx = db.write_transaction().await;
+                db.write(KnownPeers::KEY, &peers, &mut wtx)
+                    .await
+                    .expect("Failed to write");
+                wtx.commit().await.expect("Failed to write")
+
+                */
             }
         };
     }

@@ -3,6 +3,7 @@
 ``` 
 #Add the nightly toolchain
 rustup toolchain install nightly
+rustup component add rust-src
 
 #add the compiler target
 rustup target add thumbv7em-none-eabihf
